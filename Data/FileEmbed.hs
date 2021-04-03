@@ -40,12 +40,24 @@ module Data.FileEmbed
     , makeRelativeToProject
       -- * Internal
     , stringToBs
+    , embed
+
+    , getFile
+    , getExistingFile
+    , getFiles
+    , getPaths
+    , getStringFile
+    , getExistingStringFile
+
     , bsToExp
+    , dirToExp
     , strToExp
+    , pathsToExp
     ) where
 
+import Language.Haskell.TH (listE)
 import Language.Haskell.TH.Syntax
-    ( Exp (AppE, ListE, LitE, TupE, SigE, VarE)
+    ( Exp (AppE, LitE, TupE, VarE)
     , Lit (..)
     , Q
     , runIO
@@ -81,11 +93,14 @@ import Data.Ord (comparing)
 -- > myFile :: Data.ByteString.ByteString
 -- > myFile = $(embedFile "dirName/fileName")
 embedFile :: FilePath -> Q Exp
-embedFile fp =
+embedFile fp = embed getFile bsToExp fp
+
+getFile :: FilePath -> Q B.ByteString
+getFile fp = do
 #if MIN_VERSION_template_haskell(2,7,0)
-    qAddDependentFile fp >>
+  qAddDependentFile fp
 #endif
-  (runIO $ B.readFile fp) >>= bsToExp
+  runIO $ B.readFile fp
 
 -- | Embed a single existing file in your source code
 -- out of list a list of paths supplied.
@@ -95,12 +110,15 @@ embedFile fp =
 -- > myFile :: Data.ByteString.ByteString
 -- > myFile = $(embedOneFileOf [ "dirName/fileName", "src/dirName/fileName" ])
 embedOneFileOf :: [FilePath] -> Q Exp
-embedOneFileOf ps =
+embedOneFileOf ps = embed getExistingFile bsToExp ps
+
+getExistingFile :: [FilePath] -> Q B.ByteString
+getExistingFile ps =
   (runIO $ readExistingFile ps) >>= \ ( path, content ) -> do
 #if MIN_VERSION_template_haskell(2,7,0)
     qAddDependentFile path
 #endif
-    bsToExp content
+    pure content
   where
     readExistingFile :: [FilePath] -> IO ( FilePath, B.ByteString )
     readExistingFile xs = do
@@ -116,10 +134,19 @@ embedOneFileOf ps =
 -- > myDir :: [(FilePath, Data.ByteString.ByteString)]
 -- > myDir = $(embedDir "dirName")
 embedDir :: FilePath -> Q Exp
-embedDir fp = do
-    typ <- [t| [(FilePath, B.ByteString)] |]
-    e <- ListE <$> ((runIO $ fileList fp) >>= mapM (pairToExp fp))
-    return $ SigE e typ
+embedDir fp = embed getFiles (dirToExp fp) fp
+
+getFiles :: FilePath -> Q [(FilePath, B.ByteString)]
+getFiles _root = do
+  pairs <- runIO (fileList _root)
+#if MIN_VERSION_template_haskell(2,7,0)
+  mapM_ (\(path, _) -> qAddDependentFile $ _root ++ '/' : path) pairs
+#endif
+  pure pairs
+
+dirToExp :: FilePath -> [(FilePath, B.ByteString)] -> Q Exp
+dirToExp _root pairs =
+  [| $(listE (fmap (\(path, bs) -> pairToExp _root (path, bs)) pairs)) :: [(FilePath, B.ByteString)] |]
 
 -- | Embed a directory listing recursively in your source code.
 --
@@ -128,10 +155,17 @@ embedDir fp = do
 --
 -- @since 0.0.11
 embedDirListing :: FilePath -> Q Exp
-embedDirListing fp = do
-    typ <- [t| [FilePath] |]
-    e <- ListE <$> ((runIO $ fmap fst <$> fileList fp) >>= mapM strToExp)
-    return $ SigE e typ
+embedDirListing fp = embed getPaths pathsToExp fp
+
+getPaths :: FilePath -> Q [FilePath]
+getPaths fp = runIO $ fmap fst <$> fileList fp
+
+pathsToExp :: [FilePath] -> Q Exp
+pathsToExp ps = [| $(listE (fmap strToExp ps)) :: [FilePath] |]
+
+-- | Generalized embed function
+embed :: (a -> Q b) -> (b -> Q Exp) -> a -> Q Exp
+embed getter toExp a = getter a >>= toExp
 
 -- | Get a directory tree in the IO monad.
 --
@@ -185,23 +219,29 @@ stringToBs = B8.pack
 --
 -- Since 0.0.9
 embedStringFile :: FilePath -> Q Exp
-embedStringFile fp =
+embedStringFile fp = embed getStringFile strToExp fp
+
+getStringFile :: FilePath -> Q String
+getStringFile fp =
 #if MIN_VERSION_template_haskell(2,7,0)
     qAddDependentFile fp >>
 #endif
-  (runIO $ P.readFile fp) >>= strToExp
+  (runIO $ P.readFile fp)
 
 -- | Embed a single existing string file in your source code
 -- out of list a list of paths supplied.
 --
 -- Since 0.0.9
 embedOneStringFileOf :: [FilePath] -> Q Exp
-embedOneStringFileOf ps =
+embedOneStringFileOf ps = embed getExistingStringFile strToExp ps
+
+getExistingStringFile :: [FilePath] -> Q String
+getExistingStringFile ps =
   (runIO $ readExistingFile ps) >>= \ ( path, content ) -> do
 #if MIN_VERSION_template_haskell(2,7,0)
     qAddDependentFile path
 #endif
-    strToExp content
+    pure content
   where
     readExistingFile :: [FilePath] -> IO ( FilePath, String )
     readExistingFile xs = do
